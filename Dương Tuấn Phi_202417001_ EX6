@@ -1,0 +1,168 @@
+.eqv DISPLAY_BASE   0x10010000  # Địa chỉ cơ sở của Bitmap Display (Static Data)
+.eqv WIDTH          512         # Chiều rộng màn hình
+.eqv HEIGHT         512         # Chiều cao màn hình
+.eqv CENTER_X       256         # Tọa độ X của gốc tọa độ Oxy
+.eqv CENTER_Y       256         # Tọa độ Y của gốc tọa độ Oxy
+.eqv COLOR_AXIS     0x00FFFFFF  # Mã màu trắng để vẽ trục tọa độ
+
+.data
+    msg_a:      .asciz "\nNhap he so a: "
+    msg_b:      .asciz "Nhap he so b: "
+    msg_c:      .asciz "Nhap he so c: "
+    msg_color:  .asciz "Nhap ma mau (VD Decimal: 16711680 = Do, 65280 = Xanh): "
+    msg_cont:   .asciz "\nVe tiep do thi khac chong len? (1: Co, 0: Thoat): "
+
+.text
+main:
+    # 1. Vẽ trục tọa độ Oxy ngay khi khởi động
+    jal ra, draw_axes
+
+main_loop:
+    # 2. Nhập các hệ số từ người dùng
+    # Nhập a -> s1
+    li a7, 4
+    la a0, msg_a
+    ecall
+    li a7, 5
+    ecall
+    mv s1, a0
+
+    # Nhập b -> s2
+    li a7, 4
+    la a0, msg_b
+    ecall
+    li a7, 5
+    ecall
+    mv s2, a0
+
+    # Nhập c -> s3
+    li a7, 4
+    la a0, msg_c
+    ecall
+    li a7, 5
+    ecall
+    mv s3, a0
+
+    # Nhập mã màu -> s4
+    li a7, 4
+    la a0, msg_color
+    ecall
+    li a7, 5
+    ecall
+    mv s4, a0
+
+    # 3. Bắt đầu vẽ đồ thị (Cho x chạy từ -256 đến 256)
+    li s5, -256         # s5 = x = -256
+    li s6, 256          # Giới hạn x = 256
+
+draw_graph_loop:
+    bgt s5, s6, ask_continue # Nếu x > 256 thì vẽ xong, chuyển sang hỏi tiếp tục
+
+    # Tính y = ax^2 + bx + c
+    mul t1, s5, s5      # t1 = x^2
+    mul t1, t1, s1      # t1 = a * x^2
+    
+    mul t2, s5, s2      # t2 = b * x
+    add t1, t1, t2      # t1 = ax^2 + bx
+    add t1, t1, s3      # t1 = ax^2 + bx + c 
+
+    # 4. Chuyển đổi tọa độ Toán học (x,y) sang Tọa độ Màn hình (X,Y)
+    # X_screen = CENTER_X + x
+    li t2, CENTER_X
+    add t2, t2, s5      # t2 = X_screen
+
+    # Y_screen = CENTER_Y - y
+    li t3, CENTER_Y
+    sub t3, t3, t1      # t3 = Y_screen
+
+    # 5. Kiểm tra viền màn hình
+    blt t2, zero, next_x # Nếu X_screen < 0 -> Bỏ qua
+    li t4, WIDTH
+    bge t2, t4, next_x   # Nếu X_screen >= 512 -> Bỏ qua
+    
+    blt t3, zero, next_x # Nếu Y_screen < 0 -> Bỏ qua
+    li t4, HEIGHT
+    bge t3, t4, next_x   # Nếu Y_screen >= 512 -> Bỏ qua
+
+    # 6. Tính toán địa chỉ bộ nhớ và tô màu Pixel
+    # Địa chỉ = BASE_ADDRESS + 4 * (Y_screen * 512 + X_screen)
+    slli t4, t3, 9      # t4 = Y_screen * 512 
+    add t4, t4, t2      # t4 = Y_screen * 512 + X_screen
+    slli t4, t4, 2      # t4 = t4 * 4 (Vì mỗi pixel chiếm 1 Word = 4 Bytes)
+    
+    li t5, DISPLAY_BASE
+    add t4, t4, t5      # t4 = Địa chỉ chính xác của pixel trên RAM
+    
+    # Phân tích mã màu ARGB và ghi xuống bộ nhớ
+    sb s4, 0(t4)        # Ghi màu vào byte 0 (Blue)
+    srli t6, s4, 8      # Dịch phải 8 bit
+    sb t6, 1(t4)        # Ghi màu vào byte 1 (Green)
+    srli t6, s4, 16     # Dịch phải 16 bit
+    sb t6, 2(t4)        # Ghi màu vào byte 2 (Red)
+
+next_x:
+    addi s5, s5, 1      # x++
+    j draw_graph_loop
+
+ask_continue:
+    # 7. Hỏi người dùng có muốn vẽ tiếp đồ thị khác không
+    li a7, 4
+    la a0, msg_cont
+    ecall
+    li a7, 5
+    ecall
+    
+    # Nếu a0 == 1 thì nhảy về nhập hệ số mới (Chồng lên đồ thị cũ)
+    li t0, 1
+    beq a0, t0, main_loop 
+
+end_program:
+    li a7, 10           # Syscall 10: Exit
+    ecall
+
+# ====================================================================
+# HÀM CON: draw_axes
+# Chức năng: Vẽ 2 đường chéo chữ thập làm trục Ox và Oy
+# ====================================================================
+draw_axes:
+    li t0, DISPLAY_BASE
+    li t1, COLOR_AXIS
+    
+    # --- Vẽ trục ngang (Ox) tại Y = 256 ---
+    li t2, 0            # x_screen = 0
+    li t3, WIDTH        # Giới hạn x = 512
+    li t4, CENTER_Y     # t4 = 256
+    
+    # Tính địa chỉ đầu tiên của trục Ox (Hàng thứ 256)
+    slli t4, t4, 9      # t4 = 256 * 512 (Thay mul bằng slli tối ưu)
+    slli t4, t4, 2      # t4 = t4 * 4
+    add t4, t4, t0      # t4 = Địa chỉ bắt đầu của hàng 256
+draw_ox:
+    bge t2, t3, draw_oy_setup
+    sw t1, 0(t4)        # Tô màu trắng
+    addi t4, t4, 4      # Tiến sang pixel bên phải
+    addi t2, t2, 1      # x++
+    j draw_ox
+
+draw_oy_setup:
+    # --- Vẽ trục dọc (Oy) tại X = 256 ---
+    li t2, 0            # y_screen = 0
+    li t3, HEIGHT       # Giới hạn y = 512
+    li t4, CENTER_X     # t4 = 256
+    
+    # Tính địa chỉ đầu tiên của trục Oy (Cột thứ 256, Hàng 0)
+    slli t4, t4, 2      # t4 = 256 * 4
+    add t4, t4, t0      # t4 = Địa chỉ bắt đầu của cột 256
+    
+    # Tính khoảng cách bộ nhớ giữa 2 pixel liền kề theo chiều dọc (WIDTH * 4)
+    li t5, WIDTH
+    slli t5, t5, 2      # t5 = 512 * 4 = 2048 bytes
+draw_oy:
+    bge t2, t3, end_draw_axes
+    sw t1, 0(t4)
+    add t4, t4, t5      # Cộng thêm 2048 bytes để nhảy thẳng xuống pixel ở hàng dưới
+    addi t2, t2, 1      # y++
+    j draw_oy
+
+end_draw_axes:
+    jalr zero, ra, 0
