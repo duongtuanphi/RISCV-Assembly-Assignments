@@ -4,12 +4,13 @@
 .eqv CENTER_X       256         # Tọa độ X của gốc tọa độ Oxy
 .eqv CENTER_Y       256         # Tọa độ Y của gốc tọa độ Oxy
 .eqv COLOR_AXIS     0x00FFFFFF  # Mã màu trắng để vẽ trục tọa độ
+.eqv SCALE_SHIFT    6           # Hệ số thu nhỏ (VD đang dịch 6 bit = chia 64)
 
 .data
     msg_a:      .asciz "\nNhap he so a: "
     msg_b:      .asciz "Nhap he so b: "
     msg_c:      .asciz "Nhap he so c: "
-    msg_color:  .asciz "Nhap ma mau (VD Decimal: 16711680 = Do, 65280 = Xanh): "
+    msg_color:  .asciz "Nhap ma mau (VD Trang = 16777215, Vang = 16776960, Xanh = 65535, Xanh la = 65280, Do = 16724787, . . .): "
     msg_cont:   .asciz "\nVe tiep do thi khac chong len? (1: Co, 0: Thoat): "
 
 .text
@@ -66,6 +67,8 @@ draw_graph_loop:
     add t1, t1, t2      # t1 = ax^2 + bx
     add t1, t1, s3      # t1 = ax^2 + bx + c 
 
+    srai t1, t1, SCALE_SHIFT
+    
     # 4. Chuyển đổi tọa độ Toán học (x,y) sang Tọa độ Màn hình (X,Y)
     # X_screen = CENTER_X + x
     li t2, CENTER_X
@@ -134,7 +137,7 @@ draw_axes:
     li t4, CENTER_Y     # t4 = 256
     
     # Tính địa chỉ đầu tiên của trục Ox (Hàng thứ 256)
-    slli t4, t4, 9      # t4 = 256 * 512 (Thay mul bằng slli tối ưu)
+    slli t4, t4, 9      # t4 = 256 * 512
     slli t4, t4, 2      # t4 = t4 * 4
     add t4, t4, t0      # t4 = Địa chỉ bắt đầu của hàng 256
 draw_ox:
