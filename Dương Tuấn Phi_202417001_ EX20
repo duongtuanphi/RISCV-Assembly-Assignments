@@ -7,148 +7,172 @@
 .eqv HEIGHT         512
 
 .data
-    # Bộ đệm lưu trữ chuỗi người dùng gõ vào (tối đa 100 ký tự)
-    input_buf:      .space 100 
+    input_buf:      .space 100      # Bộ đệm lưu chuỗi nhập liệu
     
-    # Các chuỗi thông báo (Xuất ra qua MMIO Display)
+    # Cấp phát tĩnh 400KB cho hàng đợi BFS (Tránh Stack Overflow)
+    .align 2
+    fill_queue:     .space 400000   
+    
     msg_ready:      .asciz "\nMiniCAD> "
     msg_ok:         .asciz "\n[OK] Lenh hop le!"
     msg_err:        .asciz "\n[ERROR] Sai cu phap!"
     
-    # Biến toàn cục lưu màu vẽ hiện tại (Mặc định: Trắng)
-    current_color:  .word 0x00FFFFFF
+    current_color:  .word 0x00FFFFFF # Màu khởi tạo (Trắng)
 
-    # Các từ khóa lệnh để so sánh
+    # Từ khóa lệnh
     cmd_color:      .asciz "color"
     cmd_line:       .asciz "line"
     cmd_rect:       .asciz "rectangle"
     cmd_circle:     .asciz "circle"
+    cmd_fill:       .asciz "fill"
 
 .text
+# --------------------------------------------------------------------
+# PHÂN HỆ 2: MAIN & LẮNG NGHE BÀN PHÍM (POLLING)
+# --------------------------------------------------------------------
 main:
-    # Khởi tạo màu mặc định
     li t0, 0x00FFFFFF
     la t1, current_color
     sw t0, 0(t1)
 
 main_loop:
-    # 1. In dấu nhắc lệnh "MiniCAD> " qua MMIO
     la s0, msg_ready
     jal ra, print_mmio_string
 
-    # 2. Đọc 1 dòng lệnh từ Keyboard MMIO vào input_buf
-    la s1, input_buf    # s1 trỏ đến đầu bộ đệm
+    la s1, input_buf    
 read_kbd_loop:
     li t0, KEY_CTRL
 wait_kbd:
     lw t1, 0(t0)
     andi t1, t1, 1
-    beq t1, zero, wait_kbd  # Chờ đến khi có phím được nhấn
+    beq t1, zero, wait_kbd
 
     li t0, KEY_DATA
-    lw t2, 0(t0)            # Đọc mã ASCII của phím vào t2
+    lw t2, 0(t0)
 
-    # Echo (In lại ký tự vừa gõ ra màn hình MMIO)
     mv a0, t2
     jal ra, print_mmio_char
 
-    # Xử lý nếu bấm Enter (Mã ASCII 10 hoặc 13)
     li t3, 10
     beq t2, t3, end_read_kbd
     li t3, 13
     beq t2, t3, end_read_kbd
 
-    # Lưu vào buffer và tăng con trỏ
     sb t2, 0(s1)
     addi s1, s1, 1
     j read_kbd_loop
 
 end_read_kbd:
-    sb zero, 0(s1)      # Chốt chuỗi bằng ký tự NULL (\0)
+    sb zero, 0(s1)      
 
-    # 3. Phân tích chuỗi lệnh (PARSER)
-    la s1, input_buf    # s1 trỏ lại đầu buffer để bắt đầu duyệt
-
+# --------------------------------------------------------------------
+# PHÂN HỆ 3: PARSER - ĐIỀU HƯỚNG LỆNH
+# --------------------------------------------------------------------
 parse_command:
-    # Bỏ qua khoảng trắng ở đầu (nếu có)
+    la s1, input_buf
     mv a0, s1
     jal ra, skip_spaces
-    mv s1, a0           # Cập nhật con trỏ
+    mv s1, a0           
     lb t0, 0(s1)
-    beq t0, zero, main_loop # Nếu chuỗi rỗng thì quay lại gõ lệnh mới
+    beq t0, zero, main_loop 
 
-    # Kiểm tra lệnh "color"
     la a1, cmd_color
     jal ra, str_starts_with
     bne a0, zero, do_color
 
-    # Kiểm tra lệnh "line"
     mv a0, s1
     la a1, cmd_line
     jal ra, str_starts_with
     bne a0, zero, do_line
 
-    # Lỗi cú pháp
+    mv a0, s1
+    la a1, cmd_rect
+    jal ra, str_starts_with
+    bne a0, zero, do_rect
+    
+    mv a0, s1
+    la a1, cmd_circle
+    jal ra, str_starts_with
+    bne a0, zero, do_circle
+
+    mv a0, s1
+    la a1, cmd_fill
+    jal ra, str_starts_with
+    bne a0, zero, do_fill
+
     j syntax_error
 
-# ==========================================
-# THỰC THI LỆNH: color n
-# ==========================================
+# --------------------------------------------------------------------
+# PHÂN HỆ 4: COMMAND HANDLERS (BÓC TÁCH THAM SỐ)
+# --------------------------------------------------------------------
 do_color:
-    mv s1, a0           # Cập nhật con trỏ sau chữ "color"
-    mv a0, s1
-    jal ra, parse_int   # Đọc tham số n (Mã màu)
-    blt a1, zero, syntax_error # Nếu không có số, báo lỗi
-    
+    mv a0, a0           
+    jal ra, parse_int
+    blt a1, zero, syntax_error 
     la t0, current_color
-    sw a0, 0(t0)        # Lưu màu mới
+    sw a0, 0(t0)
     j command_success
 
-# ==========================================
-# THỰC THI LỆNH: line x1 y1 x2 y2
-# ==========================================
 do_line:
-    mv s1, a0           # s1 trỏ đến phần sau chữ "line"
-    
-    # Đọc x1 -> s2
+    mv s1, a0
+    jal ra, parse_4_ints 
+    blt a4, zero, syntax_error 
+    mv a0, s2           
+    mv a1, s3           
+    mv a2, s4           
+    mv a3, s5           
+    jal ra, draw_line
+    j command_success
+
+do_rect:
+    mv s1, a0
+    jal ra, parse_4_ints
+    blt a4, zero, syntax_error
+    mv a0, s2           
+    mv a1, s3           
+    mv a2, s4           
+    mv a3, s5           
+    jal ra, draw_rect
+    j command_success
+
+do_circle:
+    mv s1, a0           
     mv a0, s1
     jal ra, parse_int
     blt a1, zero, syntax_error
     mv s2, a0
-    mv s1, a2           # Cập nhật con trỏ chuỗi
-    
-    # Đọc y1 -> s3
+    mv s1, a2           
     mv a0, s1
     jal ra, parse_int
     blt a1, zero, syntax_error
     mv s3, a0
     mv s1, a2
-    
-    # Đọc x2 -> s4
     mv a0, s1
     jal ra, parse_int
     blt a1, zero, syntax_error
     mv s4, a0
-    mv s1, a2
-    
-    # Đọc y2 -> s5
+    mv a0, s2           
+    mv a1, s3           
+    mv a2, s4           
+    jal ra, draw_circle
+    j command_success
+
+do_fill:
+    mv s1, a0           
     mv a0, s1
     jal ra, parse_int
     blt a1, zero, syntax_error
-    mv s5, a0
-    
-    # Gọi hàm vẽ đoạn thẳng Bresenham (s2, s3) đến (s4, s5)
+    mv s2, a0
+    mv s1, a2
+    mv a0, s1
+    jal ra, parse_int
+    blt a1, zero, syntax_error
+    mv s3, a0
     mv a0, s2
     mv a1, s3
-    mv a2, s4
-    mv a3, s5
-    jal ra, draw_line
-
+    jal ra, draw_fill
     j command_success
 
-# ==========================================
-# CÁC HÀM TIỆN ÍCH & TRẠNG THÁI
-# ==========================================
 command_success:
     la s0, msg_ok
     jal ra, print_mmio_string
@@ -159,145 +183,431 @@ syntax_error:
     jal ra, print_mmio_string
     j main_loop
 
-
-# ====================================================================
-# HÀM ĐỒ HỌA: draw_line (Thuật toán Bresenham)
-# Input: a0 = x1, a1 = y1, a2 = x2, a3 = y2
-# ====================================================================
-draw_line:
-    # Đây là một phiên bản rút gọn của Bresenham. 
-    # Để tránh code quá dài, ta xét trường hợp x1 < x2 và vẽ đơn giản.
-    # (Trong bài nộp thực tế, bạn có thể bổ sung dx, dy, sx, sy đầy đủ).
-    # ...
-    # Để giữ form ngắn gọn, tớ demo hàm set_pixel ở đây:
-    
-    addi sp, sp, -16
-    sw ra, 12(sp)
-    
-    # Vẽ tạm 1 điểm tại (x1, y1) để chứng minh logic
-    jal ra, set_pixel
-    
-    # Vẽ tạm 1 điểm tại (x2, y2)
-    mv a0, a2
-    mv a1, a3
-    jal ra, set_pixel
-
-    lw ra, 12(sp)
-    addi sp, sp, 16
+# --------------------------------------------------------------------
+# PHÂN HỆ 5: THƯ VIỆN ĐỒ HỌA (GRAPHICS ALGORITHMS)
+# --------------------------------------------------------------------
+draw_rect:
+    addi sp, sp, -24
+    sw ra, 20(sp)
+    sw s2, 16(sp)
+    sw s3, 12(sp)
+    sw s4, 8(sp)
+    sw s5, 4(sp)
+    mv s2, a0           
+    mv s3, a1           
+    mv s4, a2           
+    mv s5, a3           
+    mv a0, s2
+    mv a1, s3
+    mv a2, s4
+    mv a3, s3
+    jal ra, draw_line
+    mv a0, s2
+    mv a1, s5
+    mv a2, s4
+    mv a3, s5
+    jal ra, draw_line
+    mv a0, s2
+    mv a1, s3
+    mv a2, s2
+    mv a3, s5
+    jal ra, draw_line
+    mv a0, s4
+    mv a1, s3
+    mv a2, s4
+    mv a3, s5
+    jal ra, draw_line
+    lw s5, 4(sp)
+    lw s4, 8(sp)
+    lw s3, 12(sp)
+    lw s2, 16(sp)
+    lw ra, 20(sp)
+    addi sp, sp, 24
     jalr zero, ra, 0
 
+draw_line:
+    addi sp, sp, -40
+    sw ra, 36(sp)
+    sw s1, 32(sp)
+    sw s2, 28(sp)
+    sw s3, 24(sp)
+    sw s4, 20(sp)
+    sw s5, 16(sp)
+    sw s6, 12(sp)
+    sw s7, 8(sp)
+    sw s8, 4(sp)
+    sw s9, 0(sp)
+    mv s1, a0           
+    mv s2, a1           
+    mv s3, a2           
+    mv s4, a3           
+    sub s5, s3, s1      
+    bgez s5, calc_dy
+    neg s5, s5          
+calc_dy:
+    sub s6, s4, s2      
+    bgez s6, make_dy_neg
+    neg s6, s6          
+make_dy_neg:
+    neg s6, s6          
+    li s7, 1            
+    blt s1, s3, calc_sy
+    li s7, -1
+calc_sy:
+    li s8, 1            
+    blt s2, s4, calc_err
+    li s8, -1
+calc_err:
+    add s9, s5, s6      
+bresenham_loop:
+    mv a0, s1
+    mv a1, s2
+    jal ra, set_pixel
+    bne s1, s3, check_e2
+    beq s2, s4, end_draw_line
+check_e2:
+    slli t0, s9, 1      
+    blt t0, s6, check_dx
+    beq s1, s3, check_dx 
+    add s9, s9, s6      
+    add s1, s1, s7      
+check_dx:
+    bgt t0, s5, next_pixel
+    beq s2, s4, next_pixel 
+    add s9, s9, s5      
+    add s2, s2, s8      
+next_pixel:
+    j bresenham_loop
+end_draw_line:
+    lw s9, 0(sp)
+    lw s8, 4(sp)
+    lw s7, 8(sp)
+    lw s6, 12(sp)
+    lw s5, 16(sp)
+    lw s4, 20(sp)
+    lw s3, 24(sp)
+    lw s2, 28(sp)
+    lw s1, 32(sp)
+    lw ra, 36(sp)
+    addi sp, sp, 40
+    jalr zero, ra, 0
 
-# ====================================================================
-# HÀM ĐỒ HỌA: set_pixel
-# Input: a0 = X, a1 = Y
-# Tính địa chỉ: 0x10010000 + (Y * 512 + X) * 4
-# ====================================================================
+draw_circle:
+    addi sp, sp, -28
+    sw ra, 24(sp)
+    sw s1, 20(sp)
+    sw s2, 16(sp)
+    sw s3, 12(sp)
+    sw s4, 8(sp)
+    sw s5, 4(sp)
+    sw s6, 0(sp)
+    mv s1, a0           
+    mv s2, a1           
+    li s3, 0            
+    mv s4, a2           
+    li t0, 3
+    slli t1, a2, 1      
+    sub s5, t0, t1      
+circle_loop:
+    bgt s3, s4, end_draw_circle 
+    jal ra, plot_8_points
+    bltz s5, p_negative
+    addi s4, s4, -1     
+    sub t0, s3, s4      
+    slli t0, t0, 2      
+    addi t0, t0, 10     
+    add s5, s5, t0      
+    j next_x
+p_negative:
+    slli t0, s3, 2      
+    addi t0, t0, 6      
+    add s5, s5, t0      
+next_x:
+    addi s3, s3, 1      
+    j circle_loop
+end_draw_circle:
+    lw s6, 0(sp)
+    lw s5, 4(sp)
+    lw s4, 8(sp)
+    lw s3, 12(sp)
+    lw s2, 16(sp)
+    lw s1, 20(sp)
+    lw ra, 24(sp)
+    addi sp, sp, 28
+    jalr zero, ra, 0
+
+plot_8_points:
+    addi sp, sp, -4
+    sw ra, 0(sp)
+    add a0, s1, s3
+    add a1, s2, s4
+    jal ra, set_pixel
+    sub a0, s1, s3
+    add a1, s2, s4
+    jal ra, set_pixel
+    add a0, s1, s3
+    sub a1, s2, s4
+    jal ra, set_pixel
+    sub a0, s1, s3
+    sub a1, s2, s4
+    jal ra, set_pixel
+    add a0, s1, s4
+    add a1, s2, s3
+    jal ra, set_pixel
+    sub a0, s1, s4
+    add a1, s2, s3
+    jal ra, set_pixel
+    add a0, s1, s4
+    sub a1, s2, s3
+    jal ra, set_pixel
+    sub a0, s1, s4
+    sub a1, s2, s3
+    jal ra, set_pixel
+    lw ra, 0(sp)
+    addi sp, sp, 4
+    jalr zero, ra, 0
+
+draw_fill:
+    addi sp, sp, -36
+    sw ra, 32(sp)
+    sw s1, 28(sp)   
+    sw s2, 24(sp)   
+    sw s3, 20(sp)   
+    sw s4, 16(sp)   
+    sw s5, 12(sp)   
+    sw s6, 8(sp)    
+    sw s7, 4(sp)    
+    mv s5, a0
+    mv s6, a1
+    jal ra, get_pixel
+    blt a0, zero, end_draw_fill 
+    mv s1, a0       
+    la t0, current_color
+    lw s2, 0(t0)    
+    beq s1, s2, end_draw_fill
+    la s7, fill_queue
+    li s3, 0        
+    li s4, 0        
+    mv a0, s5
+    mv a1, s6
+    jal ra, set_pixel
+    slli t0, s6, 16
+    add t0, t0, s5
+    slli t1, s4, 2      
+    add t1, t1, s7      
+    sw t0, 0(t1)        
+    addi s4, s4, 1      
+bfs_loop:
+    bge s3, s4, end_draw_fill 
+    slli t1, s3, 2
+    add t1, t1, s7
+    lw t0, 0(t1)        
+    addi s3, s3, 1      
+    li t2, 0xFFFF
+    and s5, t0, t2      
+    srli s6, t0, 16     
+    addi a0, s5, 1
+    mv a1, s6
+    jal ra, check_and_push
+    addi a0, s5, -1
+    mv a1, s6
+    jal ra, check_and_push
+    mv a0, s5
+    addi a1, s6, 1
+    jal ra, check_and_push
+    mv a0, s5
+    addi a1, s6, -1
+    jal ra, check_and_push
+    j bfs_loop
+end_draw_fill:
+    lw s7, 4(sp)
+    lw s6, 8(sp)
+    lw s5, 12(sp)
+    lw s4, 16(sp)
+    lw s3, 20(sp)
+    lw s2, 24(sp)
+    lw s1, 28(sp)
+    lw ra, 32(sp)
+    addi sp, sp, 36
+    jalr zero, ra, 0
+
+check_and_push:
+    addi sp, sp, -12
+    sw ra, 8(sp)
+    sw a0, 4(sp)
+    sw a1, 0(sp)
+    jal ra, get_pixel
+    bne a0, s1, cap_end
+    lw a0, 4(sp)
+    lw a1, 0(sp)
+    jal ra, set_pixel
+    lw a0, 4(sp)
+    lw a1, 0(sp)
+    slli t0, a1, 16
+    add t0, t0, a0
+    slli t1, s4, 2
+    add t1, t1, s7
+    sw t0, 0(t1)
+    addi s4, s4, 1      
+cap_end:
+    lw a1, 0(sp)
+    lw a0, 4(sp)
+    lw ra, 8(sp)
+    addi sp, sp, 12
+    jalr zero, ra, 0
+
 set_pixel:
-    # Kiểm tra giới hạn màn hình (0 -> 511)
     blt a0, zero, end_set_pixel
     li t0, WIDTH
     bge a0, t0, end_set_pixel
     blt a1, zero, end_set_pixel
     li t0, HEIGHT
     bge a1, t0, end_set_pixel
-
-    slli t0, a1, 9      # Y * 512
-    add t0, t0, a0      # Y * 512 + X
-    slli t0, t0, 2      # Nhân 4 bytes
+    slli t0, a1, 9      
+    add t0, t0, a0      
+    slli t0, t0, 2      
     li t1, BMP_BASE
-    add t0, t0, t1      # Địa chỉ bộ nhớ
-    
+    add t0, t0, t1      
     la t1, current_color
-    lw t2, 0(t1)        # Lấy màu hiện tại
-    sw t2, 0(t0)        # Tô màu pixel
-
+    lw t2, 0(t1)        
+    sw t2, 0(t0)        
 end_set_pixel:
     jalr zero, ra, 0
 
-# ====================================================================
-# HÀM CHUỖI: parse_int (Trích xuất số từ chuỗi)
-# Input: a0 = Địa chỉ chuỗi
-# Output: a0 = Giá trị số nguyên, a1 = Thành công (1) / Thất bại (-1), a2 = Con trỏ mới
-# ====================================================================
+get_pixel:
+    blt a0, zero, out_of_bounds
+    li t0, WIDTH
+    bge a0, t0, out_of_bounds
+    blt a1, zero, out_of_bounds
+    li t0, HEIGHT
+    bge a1, t0, out_of_bounds
+    slli t0, a1, 9      
+    add t0, t0, a0      
+    slli t0, t0, 2      
+    li t1, BMP_BASE
+    add t0, t0, t1      
+    lw a0, 0(t0)        
+    jalr zero, ra, 0
+out_of_bounds:
+    li a0, -1
+    jalr zero, ra, 0
+
+# --------------------------------------------------------------------
+# PHÂN HỆ 6: THƯ VIỆN TIỆN ÍCH (STRING & MATH) - ĐÃ FIX LỖI NUỐT SỐ
+# --------------------------------------------------------------------
+parse_4_ints:
+    addi sp, sp, -4
+    sw ra, 0(sp)
+    mv a0, s1
+    jal ra, parse_int
+    blt a1, zero, parse_4_fail
+    mv s2, a0
+    mv a0, a2
+    jal ra, parse_int
+    blt a1, zero, parse_4_fail
+    mv s3, a0
+    mv a0, a2
+    jal ra, parse_int
+    blt a1, zero, parse_4_fail
+    mv s4, a0
+    mv a0, a2
+    jal ra, parse_int
+    blt a1, zero, parse_4_fail
+    mv s5, a0
+    li a4, 1
+    j parse_4_end
+parse_4_fail:
+    li a4, -1
+parse_4_end:
+    lw ra, 0(sp)
+    addi sp, sp, 4
+    jalr zero, ra, 0
+
 parse_int:
     mv t0, a0
-    li t1, 0            # Tích lũy số = 0
-    li t2, 0            # Cờ báo hiệu có số hay không (0=Không, 1=Có)
-    
-skip_to_num:
+    li t1, 0            
+    li t2, 0            
+skip_leading_spaces:
     lb t3, 0(t0)
     beq t3, zero, end_parse_int
-    li t4, 32           # Dấu cách
-    beq t3, t4, next_char_num
-    
-    # Kiểm tra ký tự có nằm trong '0' -> '9' không (48 -> 57)
+    li t4, 32           
+    beq t3, t4, skip_sp_inc
+    li t4, 9            
+    beq t3, t4, skip_sp_inc
+    j read_digits       
+skip_sp_inc:
+    addi t0, t0, 1
+    j skip_leading_spaces
+read_digits:
+    lb t3, 0(t0)
+    beq t3, zero, end_parse_int
     li t4, 48
-    blt t3, t4, end_parse_int # Lỗi cú pháp nếu gặp chữ cái
+    blt t3, t4, end_parse_int 
     li t4, 57
     bgt t3, t4, end_parse_int
-    
-    # Có số: t1 = t1 * 10 + (t3 - '0')
     li t4, 10
     mul t1, t1, t4
     addi t3, t3, -48
     add t1, t1, t3
-    li t2, 1            # Bật cờ thành công
-    
-next_char_num:
+    li t2, 1            
     addi t0, t0, 1
-    j skip_to_num
-
+    j read_digits       
 end_parse_int:
-    mv a0, t1           # Kết quả
-    beq t2, zero, parse_fail
-    li a1, 1            # Thành công
-    mv a2, t0           # Con trỏ mới
+    mv a0, t1           
+    beq t2, zero, parse_fail_lbl
+    li a1, 1            
+    mv a2, t0           
     jalr zero, ra, 0
-parse_fail:
+parse_fail_lbl:
     li a1, -1
     jalr zero, ra, 0
 
-# ====================================================================
-# HÀM CHUỖI: str_starts_with
-# ====================================================================
 str_starts_with:
     mv t0, a0
     mv t1, a1
 check_loop:
     lb t2, 0(t1)
-    beq t2, zero, match_ok  # Đã check hết từ khóa
+    beq t2, zero, match_ok  
     lb t3, 0(t0)
-    bne t2, t3, match_fail  # Lệch ký tự
+    bne t2, t3, match_fail  
     addi t0, t0, 1
     addi t1, t1, 1
     j check_loop
 match_ok:
-    mv a0, t0           # Trả về con trỏ ngay sau từ khóa
+    mv a0, t0           
     jalr zero, ra, 0
 match_fail:
     li a0, 0
     jalr zero, ra, 0
 
-# ====================================================================
-# HÀM MMIO: print_mmio_string & print_mmio_char
-# ====================================================================
+skip_spaces:
+    mv t0, a0
+skip_spaces_loop:
+    lb t1, 0(t0)
+    li t2, 32
+    beq t1, t2, skip_spaces_inc
+    li t2, 9
+    beq t1, t2, skip_spaces_inc
+    j end_skip_spaces
+skip_spaces_inc:
+    addi t0, t0, 1
+    j skip_spaces_loop
+end_skip_spaces:
+    mv a0, t0
+    jalr zero, ra, 0
+
 print_mmio_string:
     mv t4, s0
 print_str_loop:
     lb a0, 0(t4)
     beq a0, zero, end_print_str
-    
-    # Đẩy t4 vào stack để tránh bị đè khi gọi print_mmio_char
     addi sp, sp, -8
     sw ra, 0(sp)
     sw t4, 4(sp)
-    
     jal ra, print_mmio_char
-    
     lw t4, 4(sp)
     lw ra, 0(sp)
     addi sp, sp, 8
-    
     addi t4, t4, 1
     j print_str_loop
 end_print_str:
@@ -311,17 +621,4 @@ wait_disp:
     beq t1, zero, wait_disp
     li t0, DISP_DATA
     sw a0, 0(t0)
-    jalr zero, ra, 0
-
-# Bỏ qua khoảng trắng
-skip_spaces:
-    mv t0, a0
-skip_spaces_loop:
-    lb t1, 0(t0)
-    li t2, 32
-    bne t1, t2, end_skip_spaces
-    addi t0, t0, 1
-    j skip_spaces_loop
-end_skip_spaces:
-    mv a0, t0
     jalr zero, ra, 0
