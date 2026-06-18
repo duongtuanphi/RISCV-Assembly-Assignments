@@ -1,25 +1,23 @@
-.eqv KEY_CTRL       0xFFFF0000
-.eqv KEY_DATA       0xFFFF0004
-.eqv DISP_CTRL      0xFFFF0008
-.eqv DISP_DATA      0xFFFF000C
-.eqv BMP_BASE       0x10010000
-.eqv WIDTH          512
-.eqv HEIGHT         512
+.eqv KEY_CTRL       0xFFFF0000      # Địa chỉ thanh ghi Trạng thái bàn phím 
+.eqv KEY_DATA       0xFFFF0004      # Địa chỉ thanh ghi Dữ liệu bàn phím 
+.eqv DISP_CTRL      0xFFFF0008      # Địa chỉ thanh ghi Trạng thái màn hình Console
+.eqv DISP_DATA      0xFFFF000C      # Địa chỉ thanh ghi Dữ liệu in ra Console
+.eqv BMP_BASE       0x10040000      # Đặt màn hình ở vùng Heap (Giúp tránh đè lên vùng .data)
+.eqv WIDTH          512             # Chiều rộng màn hình đồ họa
+.eqv HEIGHT         512             # Chiều cao màn hình đồ họa
 
 .data
-    input_buf:      .space 100      # Bộ đệm lưu chuỗi nhập liệu
-    
-    # Cấp phát tĩnh 400KB cho hàng đợi BFS (Tránh Stack Overflow)
-    .align 2
-    fill_queue:     .space 400000   
+    input_buf:      .space 100      # Bộ đệm bàn phím
+    .align 2                    
+    queue_ptr:      .word 0         # Con trỏ lưu địa chỉ Hàng đợi BFS
     
     msg_ready:      .asciz "\nMiniCAD> "
     msg_ok:         .asciz "\n[OK] Lenh hop le!"
     msg_err:        .asciz "\n[ERROR] Sai cu phap!"
     
-    current_color:  .word 0x00FFFFFF # Màu khởi tạo (Trắng)
+    .align 2                      
+    current_color:  .word 0x00FFFFFF # Màu mặc định khởi tạo là Trắng
 
-    # Từ khóa lệnh
     cmd_color:      .asciz "color"
     cmd_line:       .asciz "line"
     cmd_rect:       .asciz "rectangle"
@@ -27,101 +25,113 @@
     cmd_fill:       .asciz "fill"
 
 .text
-# --------------------------------------------------------------------
-# PHÂN HỆ 2: MAIN & LẮNG NGHE BÀN PHÍM (POLLING)
-# --------------------------------------------------------------------
+# =========================================================
+# KHỞI TẠO HỆ THỐNG & CẤP PHÁT BỘ NHỚ ĐỘNG
+# =========================================================
 main:
-    li t0, 0x00FFFFFF
-    la t1, current_color
-    sw t0, 0(t1)
+    # 1. Bypass 1MB bộ nhớ của Màn hình (Từ 0x10040000 đến 0x10140000)
+    li a7, 9                        # Lệnh hệ thống 9: Xin cấp phát bộ nhớ động (sbrk)
+    li a0, 1048576                  # Số byte cần xin: 512 x 512 x 4 bytes = 1MB
+    ecall                           # a0 lúc này trỏ tới 0x10040000, ta ném nó đi để dành đất cho màn hình
 
+    # 2. Cấp 400KB làm Hàng đợi BFS 
+    li a7, 9                       
+    li a0, 400000                   # Xin thêm 400.000 bytes (Cho Hàng đợi)
+    ecall                           # a0 trả về địa chỉ mới (0x10140000)
+    la t0, queue_ptr
+    sw a0, 0(t0)                    # Lưu cái sổ đỏ 0x10140000 này vào biến queue_ptr để phục vụ BFS 
+
+# =========================================================
+# ĐỌC BÀN PHÍM VÀ HIỂN THỊ LẠI
+# =========================================================
 main_loop:
     la s0, msg_ready
-    jal ra, print_mmio_string
+    jal ra, print_mmio_string       # In dòng chữ "\nMiniCAD> " ra console
 
-    la s1, input_buf    
+    la s1, input_buf                # s1 = Con trỏ trỏ tới đầu bộ đệm nhập liệu
 read_kbd_loop:
-    li t0, KEY_CTRL
+    li t0, KEY_CTRL                 # Trỏ t0 vào cổng kiểm tra trạng thái bàn phím
 wait_kbd:
-    lw t1, 0(t0)
-    andi t1, t1, 1
-    beq t1, zero, wait_kbd
+    lw t1, 0(t0)                    # Đọc trạng thái
+    andi t1, t1, 1                  # Lấy bit cuối cùng (Nếu = 1 là có người gõ, = 0 là chưa gõ gì)
+    beq t1, zero, wait_kbd          # Chưa gõ thì lặp lại liên tục 
 
     li t0, KEY_DATA
-    lw t2, 0(t0)
+    lw t2, 0(t0)                    # Lấy mã ASCII của phím vừa gõ vào t2
 
     mv a0, t2
-    jal ra, print_mmio_char
+    jal ra, print_mmio_char         # Echo: In chính cái phím vừa gõ lên màn hình cho người dùng xem
 
-    li t3, 10
+    # Bấm Enter để chốt lệnh
+    li t3, 10                       # Mã ASCII 10 = '\n'
     beq t2, t3, end_read_kbd
-    li t3, 13
+    li t3, 13                       # Mã ASCII 13 = '\r'
     beq t2, t3, end_read_kbd
 
-    sb t2, 0(s1)
-    addi s1, s1, 1
-    j read_kbd_loop
-
+    sb t2, 0(s1)                    # Lưu từng chữ cái vào mảng input_buf (Dùng sb vì là 1 byte ASCII)
+    addi s1, s1, 1                  # Tiến con trỏ lên 1 ô nhớ
+    j read_kbd_loop                 # Quay lại chờ phím tiếp theo
 end_read_kbd:
-    sb zero, 0(s1)      
+    sb zero, 0(s1)                  # Thêm ký tự '\0' vào cuối để chốt chuỗi
 
-# --------------------------------------------------------------------
-# PHÂN HỆ 3: PARSER - ĐIỀU HƯỚNG LỆNH
-# --------------------------------------------------------------------
+# =========================================================
+# PHÂN TÍCH LỆNH
+# =========================================================
 parse_command:
     la s1, input_buf
     mv a0, s1
-    jal ra, skip_spaces
+    jal ra, skip_spaces             # Xóa dấu cách thừa ở đầu chuỗi
     mv s1, a0           
     lb t0, 0(s1)
-    beq t0, zero, main_loop 
+    beq t0, zero, main_loop         # Nếu chuỗi rỗng -> Reset luồng chờ
 
+    # Lần lượt đem chuỗi nhập vào đi so sánh với các lệnh gốc
     la a1, cmd_color
-    jal ra, str_starts_with
-    bne a0, zero, do_color
+    jal ra, str_starts_with         # Nếu chuỗi bắt đầu bằng "color"
+    bne a0, zero, do_color          # Khớp (a0 != 0) -> Nhảy sang phân hệ xử lý color
 
     mv a0, s1
-    la a1, cmd_line
+    la a1, cmd_line			  # Nếu chuỗi bắt đầu bằng "line"
     jal ra, str_starts_with
     bne a0, zero, do_line
 
     mv a0, s1
-    la a1, cmd_rect
-    jal ra, str_starts_with
+    la a1, cmd_rect			  
+    jal ra, str_starts_with		  # Nếu chuỗi bắt đầu bằng "rectangle"	
     bne a0, zero, do_rect
     
     mv a0, s1
-    la a1, cmd_circle
-    jal ra, str_starts_with
+    la a1, cmd_circle			 
+    jal ra, str_starts_with		  # Nếu chuỗi bắt đầu bằng "circle"	
     bne a0, zero, do_circle
 
     mv a0, s1
     la a1, cmd_fill
-    jal ra, str_starts_with
+    jal ra, str_starts_with		  # Nếu chuỗi bắt đầu bằng "fill"	
     bne a0, zero, do_fill
 
-    j syntax_error
+    j syntax_error                  # Không khớp lệnh nào -> Cú pháp sai
 
-# --------------------------------------------------------------------
-# PHÂN HỆ 4: COMMAND HANDLERS (BÓC TÁCH THAM SỐ)
-# --------------------------------------------------------------------
+# =========================================================
+# ĐIỀU PHỐI CHỨC NĂNG 
+# =========================================================
 do_color:
-    mv a0, a0           
-    jal ra, parse_int
-    blt a1, zero, syntax_error 
+    mv a0, a0                       # a0 đang chứa con trỏ chuỗi sau chữ "color"
+    jal ra, parse_int               # Ép kiểu chuỗi thành số nguyên
+    blt a1, zero, syntax_error      # a1 = cờ báo lỗi. Nếu a1 < 0 (Không tìm thấy số) -> Lỗi
     la t0, current_color
-    sw a0, 0(t0)
+    sw a0, 0(t0)                    # Ghi số nguyên màu vừa bóc được vào biến current_color
     j command_success
 
 do_line:
     mv s1, a0
-    jal ra, parse_4_ints 
-    blt a4, zero, syntax_error 
+    jal ra, parse_4_ints            # Lấy 4 số nguyên ra (Tọa độ x1, y1, x2, y2)
+    blt a4, zero, syntax_error      # a4 = cờ lỗi của parse_4_ints
     mv a0, s2           
     mv a1, s3           
     mv a2, s4           
     mv a3, s5           
-    jal ra, draw_line
+    jal ra, draw_line               # Bơm 4 tọa độ vào hàm vẽ đường thẳng
     j command_success
 
 do_rect:
@@ -138,17 +148,17 @@ do_rect:
 do_circle:
     mv s1, a0           
     mv a0, s1
-    jal ra, parse_int
+    jal ra, parse_int               # Bóc tham số thứ 1 (Tọa độ tâm X)
     blt a1, zero, syntax_error
     mv s2, a0
     mv s1, a2           
     mv a0, s1
-    jal ra, parse_int
+    jal ra, parse_int               # Bóc tham số thứ 2 (Tọa độ tâm Y)
     blt a1, zero, syntax_error
     mv s3, a0
     mv s1, a2
     mv a0, s1
-    jal ra, parse_int
+    jal ra, parse_int               # Bóc tham số thứ 3 (Bán kính R)
     blt a1, zero, syntax_error
     mv s4, a0
     mv a0, s2           
@@ -160,12 +170,12 @@ do_circle:
 do_fill:
     mv s1, a0           
     mv a0, s1
-    jal ra, parse_int
+    jal ra, parse_int               # Bóc tham số thứ 1 (Tọa độ X)
     blt a1, zero, syntax_error
     mv s2, a0
     mv s1, a2
     mv a0, s1
-    jal ra, parse_int
+    jal ra, parse_int               # Bóc tham số thứ 2 (Tọa độ Y)
     blt a1, zero, syntax_error
     mv s3, a0
     mv a0, s2
@@ -176,47 +186,57 @@ do_fill:
 command_success:
     la s0, msg_ok
     jal ra, print_mmio_string
-    j main_loop
+    j main_loop                     # Xong việc -> Quay về chờ lệnh mới
 
 syntax_error:
     la s0, msg_err
     jal ra, print_mmio_string
-    j main_loop
+    j main_loop                     # Báo lỗi -> Quay về chờ lệnh mới
 
-# --------------------------------------------------------------------
-# PHÂN HỆ 5: THƯ VIỆN ĐỒ HỌA (GRAPHICS ALGORITHMS)
-# --------------------------------------------------------------------
+# =========================================================
+# ĐỒ HỌA: VẼ HÌNH CHỮ NHẬT
+# =========================================================
 draw_rect:
-    addi sp, sp, -24
-    sw ra, 20(sp)
-    sw s2, 16(sp)
-    sw s3, 12(sp)
+    addi sp, sp, -24                # Mở rộng Stack (Ngăn xếp) xuống 24 bytes (Tạo 6 ngăn)
+    sw ra, 20(sp)                   # Lưu địa chỉ trả về (Return Address)
+    sw s2, 16(sp)                   # Phải lưu s2-s5 vào Stack vì hàm này gọi hàm draw_line
+    sw s3, 12(sp)                   # Nếu không lưu, các biến s2-s5 sẽ bị hàm draw_line đè mất
     sw s4, 8(sp)
     sw s5, 4(sp)
     mv s2, a0           
     mv s3, a1           
     mv s4, a2           
     mv s5, a3           
+    
+    # Ghép Cạnh Top (x1, y1) đến (x2, y1)
     mv a0, s2
     mv a1, s3
     mv a2, s4
     mv a3, s3
     jal ra, draw_line
+    
+    # Ghép Cạnh Bottom (x1, y2) đến (x2, y2)
     mv a0, s2
     mv a1, s5
     mv a2, s4
     mv a3, s5
     jal ra, draw_line
+    
+    # Ghép Cạnh Left (x1, y1) đến (x1, y2)
     mv a0, s2
     mv a1, s3
     mv a2, s2
     mv a3, s5
     jal ra, draw_line
+    
+    # Ghép Cạnh Right (x2, y1) đến (x2, y2)
     mv a0, s4
     mv a1, s3
     mv a2, s4
     mv a3, s5
     jal ra, draw_line
+    
+    # Phục hồi nguyên trạng Stack và thoát
     lw s5, 4(sp)
     lw s4, 8(sp)
     lw s3, 12(sp)
@@ -225,7 +245,11 @@ draw_rect:
     addi sp, sp, 24
     jalr zero, ra, 0
 
+# =========================================================
+# ĐỒ HỌA: BRESENHAM LINE 
+# =========================================================
 draw_line:
+    # Mở 40 bytes trên Stack để cất 10 thanh ghi
     addi sp, sp, -40
     sw ra, 36(sp)
     sw s1, 32(sp)
@@ -237,45 +261,49 @@ draw_line:
     sw s7, 8(sp)
     sw s8, 4(sp)
     sw s9, 0(sp)
-    mv s1, a0           
-    mv s2, a1           
-    mv s3, a2           
-    mv s4, a3           
-    sub s5, s3, s1      
+    
+    mv s1, a0
+    mv s2, a1
+    mv s3, a2
+    mv s4, a3
+    
+    sub s5, s3, s1                  # dx = x2 - x1
     bgez s5, calc_dy
-    neg s5, s5          
+    neg s5, s5                      # Nếu dx âm thì lật lại thành dương (Lấy trị tuyệt đối |dx|)
 calc_dy:
-    sub s6, s4, s2      
+    sub s6, s4, s2                  # dy = y2 - y1
     bgez s6, make_dy_neg
     neg s6, s6          
 make_dy_neg:
-    neg s6, s6          
-    li s7, 1            
+    neg s6, s6                      # dy luôn âm (dy = -|y2 - y1|)
+    
+    li s7, 1                        # s7 (Bước tiến sx) mặc định = 1
     blt s1, s3, calc_sy
-    li s7, -1
+    li s7, -1                       # Nếu x1 > x2 -> Bước lùi (sx = -1)
 calc_sy:
-    li s8, 1            
+    li s8, 1                        # s8 (Bước tiến sy) mặc định = 1
     blt s2, s4, calc_err
-    li s8, -1
+    li s8, -1                       # Nếu y1 > y2 -> Bước lùi (sy = -1)
 calc_err:
-    add s9, s5, s6      
+    add s9, s5, s6                  # Sai số Error (s9) = dx + dy
+    
 bresenham_loop:
     mv a0, s1
     mv a1, s2
-    jal ra, set_pixel
+    jal ra, set_pixel               # Tô màu tọa độ (x, y) hiện tại
     bne s1, s3, check_e2
-    beq s2, s4, end_draw_line
+    beq s2, s4, end_draw_line       # Đã chạm đến (x2, y2) -> Dừng vòng lặp
 check_e2:
-    slli t0, s9, 1      
-    blt t0, s6, check_dx
+    slli t0, s9, 1                  # e2 (t0) = Error * 2 (Dịch trái 1 bit = nhân 2)
+    blt t0, s6, check_dx            # Nếu e2 < dy -> Bỏ qua update x
     beq s1, s3, check_dx 
-    add s9, s9, s6      
-    add s1, s1, s7      
+    add s9, s9, s6                  # Error = Error + dy
+    add s1, s1, s7                  # x = x + sx
 check_dx:
-    bgt t0, s5, next_pixel
+    bgt t0, s5, next_pixel          # Nếu e2 > dx -> Bỏ qua update y
     beq s2, s4, next_pixel 
-    add s9, s9, s5      
-    add s2, s2, s8      
+    add s9, s9, s5                  # Error = Error + dx
+    add s2, s2, s8                  # y = y + sy
 next_pixel:
     j bresenham_loop
 end_draw_line:
@@ -292,6 +320,9 @@ end_draw_line:
     addi sp, sp, 40
     jalr zero, ra, 0
 
+# =========================================================
+# ĐỒ HỌA: MIDPOINT CIRCLE (8-Way Symmetry)
+# =========================================================
 draw_circle:
     addi sp, sp, -28
     sw ra, 24(sp)
@@ -301,29 +332,35 @@ draw_circle:
     sw s4, 8(sp)
     sw s5, 4(sp)
     sw s6, 0(sp)
-    mv s1, a0           
-    mv s2, a1           
-    li s3, 0            
-    mv s4, a2           
+    
+    mv s1, a0                       # s1 = Tọa độ X tâm
+    mv s2, a1                       # s2 = Tọa độ Y tâm
+    li s3, 0                        # s3 = X khởi động từ 0
+    mv s4, a2                       # s4 = Y khởi động từ R (Bán kính)
+    
+    # Khởi tạo tham số kiểm tra điểm giữa (P = 3 - 2R)
     li t0, 3
-    slli t1, a2, 1      
-    sub s5, t0, t1      
+    slli t1, a2, 1                  # R * 2
+    sub s5, t0, t1                  # s5 (Biến P) = 3 - 2R
 circle_loop:
-    bgt s3, s4, end_draw_circle 
-    jal ra, plot_8_points
-    bltz s5, p_negative
-    addi s4, s4, -1     
-    sub t0, s3, s4      
-    slli t0, t0, 2      
-    addi t0, t0, 10     
-    add s5, s5, t0      
+    bgt s3, s4, end_draw_circle     # Điểm dừng thuật toán: Khi đường tròn chạm góc 45 độ (x > y)
+    jal ra, plot_8_points           # Bắn 1 tọa độ sinh ra 8 tọa độ đối xứng qua tâm
+    bltz s5, p_negative             # Nếu P < 0 -> Điểm tiếp theo sẽ đi ngang (giữ nguyên y)
+    
+    # Trường hợp P >= 0 -> Điểm tiếp theo phải tụt xuống (y = y - 1)
+    addi s4, s4, -1                 # y--
+    sub t0, s3, s4                  # (x - y)
+    slli t0, t0, 2                  # 4 * (x - y)
+    addi t0, t0, 10                 # 4 * (x - y) + 10
+    add s5, s5, t0                  # P = P + 4*(x-y) + 10
     j next_x
 p_negative:
-    slli t0, s3, 2      
-    addi t0, t0, 6      
-    add s5, s5, t0      
+    # Trường hợp P < 0
+    slli t0, s3, 2                  # 4 * x
+    addi t0, t0, 6                  # 4 * x + 6
+    add s5, s5, t0                  # P = P + 4x + 6
 next_x:
-    addi s3, s3, 1      
+    addi s3, s3, 1                  # x++ (Luôn luôn tiến 1 bước)
     j circle_loop
 end_draw_circle:
     lw s6, 0(sp)
@@ -337,88 +374,123 @@ end_draw_circle:
     jalr zero, ra, 0
 
 plot_8_points:
+    # Phép phản chiếu đối xứng qua hệ trục tọa độ
     addi sp, sp, -4
     sw ra, 0(sp)
+    
     add a0, s1, s3
     add a1, s2, s4
-    jal ra, set_pixel
+    jal ra, set_pixel               # (x_c + x, y_c + y)
+    
     sub a0, s1, s3
     add a1, s2, s4
-    jal ra, set_pixel
+    jal ra, set_pixel               # (x_c - x, y_c + y)
+    
     add a0, s1, s3
     sub a1, s2, s4
-    jal ra, set_pixel
+    jal ra, set_pixel               # (x_c + x, y_c - y)
+    
     sub a0, s1, s3
     sub a1, s2, s4
-    jal ra, set_pixel
+    jal ra, set_pixel               # (x_c - x, y_c - y)
+    
     add a0, s1, s4
     add a1, s2, s3
-    jal ra, set_pixel
+    jal ra, set_pixel               # (x_c + y, y_c + x)
+    
     sub a0, s1, s4
     add a1, s2, s3
-    jal ra, set_pixel
+    jal ra, set_pixel               # (x_c - y, y_c + x)
+    
     add a0, s1, s4
     sub a1, s2, s3
-    jal ra, set_pixel
+    jal ra, set_pixel               # (x_c + y, y_c - x)
+    
     sub a0, s1, s4
     sub a1, s2, s3
-    jal ra, set_pixel
+    jal ra, set_pixel               # (x_c - y, y_c - x)
+    
     lw ra, 0(sp)
     addi sp, sp, 4
     jalr zero, ra, 0
 
+# =========================================================
+# ĐỒ HỌA: FLOOD FILL (Queue BFS)
+# =========================================================
 draw_fill:
     addi sp, sp, -36
     sw ra, 32(sp)
-    sw s1, 28(sp)   
-    sw s2, 24(sp)   
-    sw s3, 20(sp)   
-    sw s4, 16(sp)   
-    sw s5, 12(sp)   
-    sw s6, 8(sp)    
+    sw s1, 28(sp)
+    sw s2, 24(sp)
+    sw s3, 20(sp)
+    sw s4, 16(sp)
+    sw s5, 12(sp)
+    sw s6, 8(sp)
     sw s7, 4(sp)    
-    mv s5, a0
-    mv s6, a1
+    
+    mv s5, a0                       # s5 = X khởi tạo
+    mv s6, a1                       # s6 = Y khởi tạo
     jal ra, get_pixel
-    blt a0, zero, end_draw_fill 
-    mv s1, a0       
+    blt a0, zero, end_draw_fill     # Nếu điểm nhập vào nằm ngoài màn hình -> Thoát
+    mv s1, a0                       # s1 = Màu cũ cần bị đè (Target Color)
+    
     la t0, current_color
-    lw s2, 0(t0)    
-    beq s1, s2, end_draw_fill
-    la s7, fill_queue
-    li s3, 0        
-    li s4, 0        
+    lw s2, 0(t0)                    # s2 = Màu mới dùng để tô (Fill Color)
+    beq s1, s2, end_draw_fill       # Chốt An Toàn: Nếu 2 màu trùng nhau -> Thoát để tránh vòng lặp vô cực!
+    
+    # Lấy "Sổ đỏ" vùng nhớ Hàng đợi đã xin ở hàm main
+    la t0, queue_ptr
+    lw s7, 0(t0)                    # s7 = Base Address của Hàng đợi (0x10140000)
+    
+    li s3, 0                        # s3 = Con trỏ Head (Người khám bệnh)
+    li s4, 0                        # s4 = Con trỏ Tail (Người phát số thứ tự)
+    
     mv a0, s5
     mv a1, s6
-    jal ra, set_pixel
-    slli t0, s6, 16
-    add t0, t0, s5
-    slli t1, s4, 2      
-    add t1, t1, s7      
-    sw t0, 0(t1)        
-    addi s4, s4, 1      
+    jal ra, set_pixel               # Tô màu điểm gốc
+    
+    # Ép tọa độ X, Y thành 1 thanh ghi duy nhất để tiết kiệm RAM Hàng Đợi
+    slli t0, s6, 16                 # Đẩy Y lên 16 bit cao nhất
+    add t0, t0, s5                  # Nhét X vào 16 bit thấp nhất
+    
+    slli t1, s4, 2                  # Nhân Tail với 4 (mỗi số tốn 4 bytes)
+    add t1, t1, s7                  # Cộng vào Base Address
+    sw t0, 0(t1)                    # Lưu vào mảng Hàng đợi
+    addi s4, s4, 1                  # Tăng Tail lên 1
+    
 bfs_loop:
-    bge s3, s4, end_draw_fill 
+    bge s3, s4, end_draw_fill       # Điều kiện dừng BFS: Head đuổi kịp Tail (Phòng chờ hết người)
+    
+    # Bóc dữ liệu (Pop) khỏi Hàng đợi
     slli t1, s3, 2
     add t1, t1, s7
     lw t0, 0(t1)        
-    addi s3, s3, 1      
-    li t2, 0xFFFF
-    and s5, t0, t2      
-    srli s6, t0, 16     
+    addi s3, s3, 1                  # Tăng Head lên 1
+    
+    # Giải nén Tọa độ
+    li t2, 0xFFFF                   # Mặt nạ 16 bit cuối (0000...FFFF)
+    and s5, t0, t2                  # s5 = Tọa độ X
+    srli s6, t0, 16                 # s6 = Tọa độ Y (Kéo phần cao tụt xuống)
+    
+    # Tung thuật toán lan ra 4 hướng (Cross-way)
     addi a0, s5, 1
     mv a1, s6
-    jal ra, check_and_push
+    jal ra, check_and_push          # Kiểm tra Phải
+    
     addi a0, s5, -1
     mv a1, s6
-    jal ra, check_and_push
+    jal ra, check_and_push          # Kiểm tra Trái
+    
     mv a0, s5
     addi a1, s6, 1
-    jal ra, check_and_push
+    jal ra, check_and_push          # Kiểm tra Dưới
+    
     mv a0, s5
     addi a1, s6, -1
-    jal ra, check_and_push
+    jal ra, check_and_push          # Kiểm tra Trên
+    
     j bfs_loop
+    
 end_draw_fill:
     lw s7, 4(sp)
     lw s6, 8(sp)
@@ -436,11 +508,15 @@ check_and_push:
     sw ra, 8(sp)
     sw a0, 4(sp)
     sw a1, 0(sp)
+    
     jal ra, get_pixel
-    bne a0, s1, cap_end
+    bne a0, s1, cap_end             # Nếu màu hàng xóm KHÁC mục tiêu -> Đó là "Vách Ngăn", bỏ qua ngay!
+    
     lw a0, 4(sp)
     lw a1, 0(sp)
-    jal ra, set_pixel
+    jal ra, set_pixel               # Tô màu cho hàng xóm (Đóng vai trò như đánh dấu 'visited')
+    
+    # Gói tọa độ hàng xóm nhét vào Tail Hàng đợi
     lw a0, 4(sp)
     lw a1, 0(sp)
     slli t0, a1, 16
@@ -448,7 +524,7 @@ check_and_push:
     slli t1, s4, 2
     add t1, t1, s7
     sw t0, 0(t1)
-    addi s4, s4, 1      
+    addi s4, s4, 1                  # Tail++
 cap_end:
     lw a1, 0(sp)
     lw a0, 4(sp)
@@ -456,84 +532,102 @@ cap_end:
     addi sp, sp, 12
     jalr zero, ra, 0
 
+# =========================================================
+# GIAO TIẾP MÀN HÌNH BITMAP
+# =========================================================
 set_pixel:
+    # 1. Không cho phép vẽ ra ngoài vùng khai báo
     blt a0, zero, end_set_pixel
     li t0, WIDTH
     bge a0, t0, end_set_pixel
     blt a1, zero, end_set_pixel
     li t0, HEIGHT
     bge a1, t0, end_set_pixel
-    slli t0, a1, 9      
-    add t0, t0, a0      
-    slli t0, t0, 2      
+    
+    # 2. Quy đổi tọa độ 2D (x, y) sang địa chỉ mảng 1D
+    # Công thức: Address = Base + (y * 512 + x) * 4 bytes
+    slli t0, a1, 9                  # Dịch trái 9 bit tương đương phép nhân y với 512
+    add t0, t0, a0                  # + x
+    slli t0, t0, 2                  # Nhân tiếp cho 4 (Mỗi pixel chiếm 4 bytes màu)
     li t1, BMP_BASE
-    add t0, t0, t1      
+    add t0, t0, t1                  # Cộng với địa chỉ gốc
     la t1, current_color
     lw t2, 0(t1)        
-    sw t2, 0(t0)        
+    sw t2, 0(t0)                    # Ghi đè mã màu Hex xuống thẳng RAM
 end_set_pixel:
     jalr zero, ra, 0
 
 get_pixel:
+    # Cơ chế y chang Set Pixel để đọc ra
     blt a0, zero, out_of_bounds
     li t0, WIDTH
     bge a0, t0, out_of_bounds
     blt a1, zero, out_of_bounds
     li t0, HEIGHT
     bge a1, t0, out_of_bounds
+    
     slli t0, a1, 9      
     add t0, t0, a0      
     slli t0, t0, 2      
     li t1, BMP_BASE
     add t0, t0, t1      
-    lw a0, 0(t0)        
+    lw a0, 0(t0)                    # Đọc màu và ném trả về cho hàm gọi nó qua a0
     jalr zero, ra, 0
 out_of_bounds:
-    li a0, -1
+    li a0, -1                       # Cờ lỗi nếu quét ra khỏi màn hình
     jalr zero, ra, 0
 
-# --------------------------------------------------------------------
-# PHÂN HỆ 6: THƯ VIỆN TIỆN ÍCH (STRING & MATH) - ĐÃ FIX LỖI NUỐT SỐ
-# --------------------------------------------------------------------
+# =========================================================
+# CÁC HÀM XỬ LÝ INPUT (STRING PARSER UTILS)
+# =========================================================
 parse_4_ints:
+    # Hàm trung gian móc ngoặc liên tiếp 4 lần để hút tọa độ
     addi sp, sp, -4
     sw ra, 0(sp)
+    
     mv a0, s1
     jal ra, parse_int
     blt a1, zero, parse_4_fail
     mv s2, a0
+    
     mv a0, a2
     jal ra, parse_int
     blt a1, zero, parse_4_fail
     mv s3, a0
+    
     mv a0, a2
     jal ra, parse_int
     blt a1, zero, parse_4_fail
     mv s4, a0
+    
     mv a0, a2
     jal ra, parse_int
     blt a1, zero, parse_4_fail
     mv s5, a0
-    li a4, 1
+    
+    li a4, 1                        # a4 = 1 -> Thành công trót lọt
     j parse_4_end
 parse_4_fail:
-    li a4, -1
+    li a4, -1                       # a4 = -1 -> Lỗi đứt gánh giữa đường
 parse_4_end:
     lw ra, 0(sp)
     addi sp, sp, 4
     jalr zero, ra, 0
 
 parse_int:
-    mv t0, a0
-    li t1, 0            
-    li t2, 0            
+    mv t0, a0                       # t0 = Con trỏ chuỗi hiện tại
+    li t1, 0                        # t1 = Nơi chứa kết quả số nguyên thu được (Value)
+    li t2, 0                        # t2 = Cờ kiểm tra xem chuỗi có số hay chỉ toàn chữ
 skip_leading_spaces:
-    lb t3, 0(t0)
+    lb t3, 0(t0)                    # Đọc 1 byte
     beq t3, zero, end_parse_int
-    li t4, 32           
-    beq t3, t4, skip_sp_inc
-    li t4, 9            
-    beq t3, t4, skip_sp_inc
+    
+    li t4, 32
+    beq t3, t4, skip_sp_inc         # Mã 32 là phím Space
+    
+    li t4, 9
+    beq t3, t4, skip_sp_inc         # Mã 9 là phím Tab
+    
     j read_digits       
 skip_sp_inc:
     addi t0, t0, 1
@@ -541,53 +635,62 @@ skip_sp_inc:
 read_digits:
     lb t3, 0(t0)
     beq t3, zero, end_parse_int
+    
     li t4, 48
-    blt t3, t4, end_parse_int 
+    blt t3, t4, end_parse_int       # Ký tự < '0' -> Kết thúc hút số
+    
     li t4, 57
-    bgt t3, t4, end_parse_int
+    bgt t3, t4, end_parse_int       # Ký tự > '9' -> Kết thúc hút số
+    
+    # Biến ký tự chuỗi thành giá trị số: Value = Value * 10 + (ký tự - '0')
     li t4, 10
-    mul t1, t1, t4
-    addi t3, t3, -48
-    add t1, t1, t3
-    li t2, 1            
-    addi t0, t0, 1
+    mul t1, t1, t4                  # Value * 10
+    addi t3, t3, -48                # Ký tự '0' -> Số 0
+    add t1, t1, t3                  # Cộng dồn vào t1
+    li t2, 1                        # Đã tìm thấy ít nhất 1 chữ số
+    addi t0, t0, 1                  # Lướt sang byte tiếp theo
     j read_digits       
 end_parse_int:
-    mv a0, t1           
+    mv a0, t1                       # Đổ kết quả trả về a0
     beq t2, zero, parse_fail_lbl
-    li a1, 1            
-    mv a2, t0           
+    li a1, 1                        # a1 = 1 -> Thành công
+    mv a2, t0                       # a2 trả về vị trí con trỏ cuối cùng để hàm sau chạy tiếp
     jalr zero, ra, 0
 parse_fail_lbl:
-    li a1, -1
+    li a1, -1                       # a1 = -1 -> Lỗi không thấy số
     jalr zero, ra, 0
 
 str_starts_with:
+    # So khớp chuỗi: Kiểm tra xem t0 có bắt đầu bằng tiền tố t1 hay không
     mv t0, a0
     mv t1, a1
 check_loop:
     lb t2, 0(t1)
-    beq t2, zero, match_ok  
+    beq t2, zero, match_ok          # Nếu chuỗi tiền tố hết (Chạm \0) -> Đã khớp toàn bộ
     lb t3, 0(t0)
-    bne t2, t3, match_fail  
+    bne t2, t3, match_fail          # Nếu sai khác dù chỉ 1 ký tự -> Toang luôn
+    
     addi t0, t0, 1
     addi t1, t1, 1
     j check_loop
 match_ok:
-    mv a0, t0           
+    mv a0, t0                       # Trả về con trỏ đoạn đuôi còn lại của chuỗi
     jalr zero, ra, 0
 match_fail:
-    li a0, 0
+    li a0, 0                        # Báo lỗi so khớp thất bại
     jalr zero, ra, 0
 
 skip_spaces:
     mv t0, a0
 skip_spaces_loop:
     lb t1, 0(t0)
+    
     li t2, 32
     beq t1, t2, skip_spaces_inc
+    
     li t2, 9
     beq t1, t2, skip_spaces_inc
+    
     j end_skip_spaces
 skip_spaces_inc:
     addi t0, t0, 1
@@ -597,28 +700,34 @@ end_skip_spaces:
     jalr zero, ra, 0
 
 print_mmio_string:
+    # Hàm in một chuỗi hoàn chỉnh ra cửa sổ Console (Bằng cách in từng chữ cái một)
     mv t4, s0
 print_str_loop:
     lb a0, 0(t4)
     beq a0, zero, end_print_str
+    
     addi sp, sp, -8
     sw ra, 0(sp)
     sw t4, 4(sp)
-    jal ra, print_mmio_char
+    jal ra, print_mmio_char         # Chuyền từng byte xuống hàm in Character
+    
     lw t4, 4(sp)
     lw ra, 0(sp)
     addi sp, sp, 8
+    
     addi t4, t4, 1
     j print_str_loop
 end_print_str:
     jalr zero, ra, 0
 
 print_mmio_char:
+    # Hàm in 1 ký tự ra Console bằng cơ chế Polling tương tự như đọc phím
     li t0, DISP_CTRL
 wait_disp:
     lw t1, 0(t0)
     andi t1, t1, 1
-    beq t1, zero, wait_disp
+    beq t1, zero, wait_disp         # Đợi đến khi mạch Display báo Ready (1)
+    
     li t0, DISP_DATA
-    sw a0, 0(t0)
+    sw a0, 0(t0)                    # Bắn mã ASCII thẳng vào màn hình hiển thị
     jalr zero, ra, 0
